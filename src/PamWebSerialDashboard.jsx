@@ -3,6 +3,13 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 
+// --- Persistent settings keys ---
+const LS = {
+  BAUD: "pam.baud",
+  NL: "pam.nl",
+  TAB: "pam.tab",
+};
+
 /* =========================================================================
    PAM WebSerial Dashboard — JS-only, robust parsing
    - Works with/without a printed header
@@ -117,9 +124,82 @@ export default function PamWebSerialDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSupported]);
 
+  // Load saved settings once
+  useEffect(() => {
+    const savedBaud = Number(localStorage.getItem(LS.BAUD));
+    if (Number.isFinite(savedBaud) && savedBaud > 0) setBaudRate(savedBaud);
+
+    const savedNl = localStorage.getItem(LS.NL);
+    if (savedNl === "none" || savedNl === "\r" || savedNl === "\n" || savedNl === "\r\n") {
+      setAutoNewline(savedNl);
+    }
+
+    const savedTab = localStorage.getItem(LS.TAB);
+    if (savedTab === "latest" || savedTab === "graphs" || savedTab === "settings" || savedTab === "log") {
+      setActiveTab(savedTab);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist on change
+  useEffect(() => { localStorage.setItem(LS.BAUD, String(baudRate)); }, [baudRate]);
+  useEffect(() => { localStorage.setItem(LS.NL, autoNewline); }, [autoNewline]);
+  useEffect(() => { localStorage.setItem(LS.TAB, activeTab); }, [activeTab]);
+
   // -----------------------------
   // Serial connect / disconnect
   // -----------------------------
+
+  // Export the Raw Serial Log (one column: raw)
+  function exportRawLogCsv() {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const header = "raw";
+    const rows = rawLog.map((line) => csvCell(line));
+    const csv = [header, ...rows].join("\r\n");
+    downloadCsv(`pam_raw_log_${stamp}.csv`, csv);
+  }
+
+  // Export the current time-series (wide table: Time + one col per sensor)
+  function exportSeriesCsv() {
+    // Which sensors are present?
+    const sensors = presentSensors.map((m) => m); // copy
+    if (!sensors.length) {
+      alert("No time-series data to export yet.");
+      return;
+    }
+
+    // Build a map of t -> value for each sensor
+    const mapsByKey = {};
+    const allTimes = new Set();
+    for (const m of sensors) {
+      const arr = series[m.key] || [];
+      mapsByKey[m.key] = new Map(arr.map((p) => [p.t, p.v]));
+      for (const p of arr) allTimes.add(p.t);
+    }
+    const times = Array.from(allTimes).sort((a, b) => a - b);
+
+    // Header row: Time, "Label (unit)"...
+    const headerCells = ["Time", ...sensors.map((m) => {
+      const withUnit = m.unit ? `${m.label} (${m.unit})` : m.label;
+      return csvCell(withUnit);
+    })];
+    const rows = [headerCells.join(",")];
+
+    // Body rows
+    for (const t of times) {
+      const timeIso = new Date(t).toISOString();
+      const row = [csvCell(timeIso)];
+      for (const m of sensors) {
+        const v = mapsByKey[m.key].get(t);
+        row.push(csvCell(v == null ? "" : v));
+      }
+      rows.push(row.join(","));
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    downloadCsv(`pam_timeseries_${stamp}.csv`, rows.join("\r\n"));
+  }
+
   async function connect() {
     try {
       if (!navigator.serial) throw new Error("Web Serial API not available");
@@ -439,6 +519,19 @@ export default function PamWebSerialDashboard() {
                   <option value="\n">LF (\n)</option>
                   <option value="\r\n">CRLF (\r\n)</option>
                 </select>
+                <button
+                  onClick={() => {
+                    setBaudRate(115200);
+                    setAutoNewline("\r");
+                    setActiveTab("latest");
+                    localStorage.removeItem(LS.BAUD);
+                    localStorage.removeItem(LS.NL);
+                    localStorage.removeItem(LS.TAB);
+                  }}
+                  className="mt-3 rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+                >
+                  Reset Saved Settings
+                </button>
               </div>
 
               <button
@@ -518,23 +611,33 @@ export default function PamWebSerialDashboard() {
         {/* Log */}
         {activeTab === "log" && (
           <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="text-sm font-medium text-slate-700">Raw Serial Log</div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setRawLog([])}
-                  className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
-                >
-                  Clear
-                </button>
-                <button
-                  onClick={() => navigator.clipboard.writeText(rawLog.join("\n"))}
-                  className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
-                >
-                  Copy
-                </button>
-              </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => setRawLog([])}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => navigator.clipboard.writeText(rawLog.join("\n"))}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+              >
+                Copy
+              </button>
+              <button
+                onClick={exportRawLogCsv}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+              >
+                Export Raw CSV
+              </button>
+              <button
+                onClick={exportSeriesCsv}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+              >
+                Export Time-Series CSV
+              </button>
             </div>
+
             <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap text-xs text-slate-700">
 {rawLog.join("\n")}
             </pre>
@@ -564,3 +667,23 @@ function latestFind(header, latest, pattern) {
   if (typeof val === "number") return Number.isFinite(val) ? val : null;
   return val;
 }
+
+// --- CSV helpers ---
+function csvCell(v) {
+  if (v == null) return "";
+  const s = String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadCsv(filename, csvString) {
+  const blob = new Blob([csvString], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
