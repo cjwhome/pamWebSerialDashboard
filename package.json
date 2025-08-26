@@ -18,7 +18,7 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "deploy": "scp -r build/* craig@34.170.221.227:/var/www/html/pam/ && sudo chmod -R 755 /var/www/html/pam && sudo chown -R www-data:www-data /var/www/html/pam",
+    "deploy": "scp -r build/* craig@34.170.221.227:/var/www/html/pam/ && chmod -R 755 /var/www/html/pam",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },

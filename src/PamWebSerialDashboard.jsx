@@ -82,6 +82,14 @@ function fmtTime(ms) {
 }
 
 export default function PamWebSerialDashboard() {
+  const headerRef = useRef(null);
+  const latestRef = useRef({});
+  const seriesRef = useRef({});
+
+  useEffect(() => { headerRef.current = header; }, [header]);
+  useEffect(() => { latestRef.current = latest; }, [latest]);
+  useEffect(() => { seriesRef.current = series; }, [series]);
+
   const readerRef = useRef(null);
   const writerRef = useRef(null);
   const portRef = useRef(null);
@@ -200,65 +208,65 @@ async function connect() {
     const trimmed = String(line).trim();
     if (!trimmed) return;
 
-    // Always log raw
+    // Always log raw for debugging
     pushLog(trimmed);
 
-    // If we don't have a header yet, try to detect one or assume default
-    if (!header) {
-      // Case A: the device prints a header line with letters/units
+    // If we don't have a header yet, try to detect one
+    if (!headerRef.current) {
+      // case: textual header (with letters/units)
       if (/,/.test(trimmed) && /[A-Za-z]/.test(trimmed)) {
         const tokens = trimmed.split(/\s*,\s*/);
-        setHeader(tokens);
+        console.log("Detected header:", tokens);
+        headerRef.current = tokens;     // update ref immediately for next line
+        setHeader(tokens);              // update state for UI
         return;
       }
-      // Case B: data rows arrive without a header — assume our default if it fits
-      if (/,/.test(trimmed) && looksLikeNumericCsv(trimmed)) {
-        const cells = trimmed.split(/\s*,\s*/);
-        if (cells.length === DEFAULT_HEADER.length) {
-          setHeader(DEFAULT_HEADER);
-          // fall through to parse this row with the assumed header
-        } else {
-          // not enough info yet — wait for a header or matching-length row
-          return;
-        }
-      } else {
-        return;
-      }
+      // (optional) if you support a default header when only numeric rows arrive, you can set it here
+      return;
     }
 
-    // Parse a data row when header is known
-    if (header && trimmed.includes(",")) {
+    // From here on we have a header and can parse data rows
+    if (trimmed.includes(",")) {
+      const hdr = headerRef.current;
       const cells = trimmed.split(/\s*,\s*/);
-      if (cells.length !== header.length) return; // ignore mismatched rows
+      if (cells.length !== hdr.length) {
+        // Helpful debug so we can see why parsing was skipped
+        console.warn("CSV length mismatch", { expected: hdr.length, got: cells.length, hdr, line: trimmed });
+        return;
+      }
 
+      // Build row object
       const row = {};
-      header.forEach((h, i) => (row[h] = cells[i] ?? ""));
+      for (let i = 0; i < hdr.length; i++) row[hdr[i]] = cells[i] ?? "";
 
       const nowMs = Date.now();
       const t = buildTimestamp(row, nowMs);
 
-      // Update latest map
-      const nextLatest = { ...latest };
-      for (const h of header) {
-        const raw = row[h];
-        const num = parseMaybeNumber(raw);
-        nextLatest[h] = num ?? raw ?? null;
-      }
-      setLatest(nextLatest);
-
-      // Update series
-      const update = { ...series };
-      for (const meta of SENSOR_MAP) {
-        const matchingHeader = header.find((h) => meta.matches(h));
-        if (!matchingHeader) continue;
-        const v = parseMaybeNumber(row[matchingHeader]);
-        if (!update[meta.key]) update[meta.key] = [];
-        update[meta.key] = [...update[meta.key], { t, v }];
-        if (update[meta.key].length > maxPoints) {
-          update[meta.key].splice(0, update[meta.key].length - maxPoints);
+      // Update "latest" (functional form to avoid stale state)
+      setLatest(prev => {
+        const next = { ...prev };
+        for (const h of hdr) {
+          const num = parseMaybeNumber(row[h]);
+          next[h] = num ?? row[h] ?? null;
         }
-      }
-      setSeries(update);
+        return next;
+      });
+
+      // Update time-series for any known sensors
+      setSeries(prev => {
+        const next = { ...prev };
+        for (const meta of SENSOR_MAP) {
+          const matchingHeader = hdr.find(h => meta.matches(h));
+          if (!matchingHeader) continue;
+          const v = parseMaybeNumber(row[matchingHeader]);
+          if (!next[meta.key]) next[meta.key] = [];
+          next[meta.key] = [...next[meta.key], { t, v }];
+          if (next[meta.key].length > maxPoints) {
+            next[meta.key].splice(0, next[meta.key].length - maxPoints);
+          }
+        }
+        return next;
+      });
     }
   }
 
