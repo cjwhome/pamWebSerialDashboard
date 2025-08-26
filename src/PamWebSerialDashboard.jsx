@@ -1,53 +1,49 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 
-// -----------------------------
-// Helpers & Types (removed TS types, using plain JS)
-// -----------------------------
+/* =========================================================================
+   PAM WebSerial Dashboard — JS-only, robust parsing
+   - Works with/without a printed header
+   - Uses refs to avoid stale closures in the serial read loop
+   - Handles CRLF/LF/CR newlines
+   - “Assume Default Header” + custom header input
+   ======================================================================= */
 
-// Identify sensors we want to surface prominently. You can add more mappings here.
+// -----------------------------
+// Sensor map + defaults
+// -----------------------------
 const SENSOR_MAP = [
-  { key: "PM1", matches: (h) => /\bPM1\b/i.test(h), label: "PM1", unit: "µg/m³" },
-  { key: "PM2_5", matches: (h) => /PM2\.5/i.test(h), label: "PM2.5", unit: "µg/m³" },
-  { key: "PM10", matches: (h) => /\bPM10\b/i.test(h), label: "PM10", unit: "µg/m³" },
-  { key: "NO2", matches: (h) => /\bNO2\b/i.test(h), label: "NO₂", unit: "ppb" },
-  { key: "CO", matches: (h) => /\bCO\b/i.test(h), label: "CO", unit: "ppb" },
-  { key: "CO2", matches: (h) => /\bCO2\b/i.test(h), label: "CO₂", unit: "ppm" },
-  { key: "TVOC", matches: (h) => /TVOC/i.test(h), label: "TVOCs", unit: "ppb" },
-  { key: "RH", matches: (h) => /RELH|RH\b/i.test(h), label: "Relative Humidity", unit: "%" },
-  { key: "TEMP", matches: (h) => /TEMP\b/i.test(h), label: "Temperature", unit: "°C" },
-  { key: "PRESS", matches: (h) => /PRESS\b/i.test(h), label: "Pressure", unit: "hPa" },
-  { key: "CH4", matches: (h) => /METHANE|CH4/i.test(h), label: "Methane", unit: "ppm" },
-  { key: "BAT", matches: (h) => /Battery/i.test(h), label: "Battery", unit: "%" },
+  { key: "PM1",   matches: (h) => /\bPM1\b/i.test(h),   label: "PM1", unit: "µg/m³" },
+  { key: "PM2_5", matches: (h) => /PM2\.5/i.test(h),    label: "PM2.5", unit: "µg/m³" },
+  { key: "PM10",  matches: (h) => /\bPM10\b/i.test(h),  label: "PM10", unit: "µg/m³" },
+  { key: "NO2",   matches: (h) => /\bNO2\b/i.test(h),   label: "NO₂", unit: "ppb" },
+  { key: "CO",    matches: (h) => /\bCO\b/i.test(h),    label: "CO", unit: "ppb" },
+  { key: "CO2",   matches: (h) => /\bCO2\b/i.test(h),   label: "CO₂", unit: "ppm" },
+  { key: "TVOC",  matches: (h) => /TVOC/i.test(h),      label: "TVOCs", unit: "ppb" },
+  { key: "RH",    matches: (h) => /RELH|RH\b/i.test(h), label: "Relative Humidity", unit: "%" },
+  { key: "TEMP",  matches: (h) => /TEMP\b/i.test(h),    label: "Temperature", unit: "°C" },
+  { key: "PRESS", matches: (h) => /PRESS\b/i.test(h),   label: "Pressure", unit: "hPa" },
+  { key: "CH4",   matches: (h) => /METHANE|CH4/i.test(h), label: "Methane", unit: "ppm" },
+  { key: "BAT",   matches: (h) => /Battery/i.test(h),   label: "Battery", unit: "%" },
 ];
 
-// Fallback default CSV header (when device streams rows without a header)
+// Fallback when the device streams numeric rows without a header
 const DEFAULT_HEADER = [
   "DeviceId","PM1(UGM3)","PM2.5(UGM3)","PM10(UGM3)","TVOC(PPB)","CO2(PPM)","RELHUM(%)","TEMP(C)",
   "PRESS(MBAR)","LAT(LAT)","LON(LON)","Battery(%)","Date","Time"
 ];
+const looksLikeNumericCsv = (line) => /^[0-9 .,:\-]+$/.test(String(line));
 
-// True if the line looks like pure numeric CSV (covers GPS/date/time)
-function looksLikeNumericCsv(line) {
-  return /^[0-9 .,:\-]+$/.test(line);
-}
-
-// Line splitter for Web Serial stream -> lines of text
+// -----------------------------
+// Line splitter (bytes -> text lines)
+// -----------------------------
 class LineBreakTransformer {
-  constructor() {
-    this.container = "";
-  }
+  constructor() { this.container = ""; }
   transform(chunk, controller) {
     this.container += chunk;
+    // IMPORTANT: one-line regex (CRLF, LF, or CR)
     const lines = this.container.split(/\r\n|[\r\n]/);
     this.container = lines.pop() || "";
     for (const line of lines) controller.enqueue(line);
@@ -57,126 +53,115 @@ class LineBreakTransformer {
   }
 }
 
+// -----------------------------
+// Helpers
+// -----------------------------
 function parseMaybeNumber(value) {
-  if (!value) return null;
-  const v = value.trim();
-  if (v.toUpperCase() === "N/A") return null;
+  if (value == null) return null;
+  const v = String(value).trim();
+  if (!v || v.toUpperCase() === "N/A") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-
 function buildTimestamp(row, fallbackMs) {
-  const dateStr = row["Date"];
-  const timeStr = row["Time"];
+  const dateStr = row["Date"] || row["DATE"];
+  const timeStr = row["Time"] || row["TIME"];
   if (dateStr && timeStr) {
-    const isoLike = `${dateStr}T${timeStr}`;
-    const ms = new Date(isoLike).getTime();
+    const ms = new Date(`${dateStr}T${timeStr}`).getTime();
     if (!Number.isNaN(ms)) return ms;
   }
   return fallbackMs;
 }
+function fmtTime(ms) { return new Date(ms).toLocaleTimeString(); }
 
-function fmtTime(ms) {
-  const d = new Date(ms);
-  return d.toLocaleTimeString();
-}
-
+// -----------------------------
+// Component
+// -----------------------------
 export default function PamWebSerialDashboard() {
-  const headerRef = useRef(null);
-  const latestRef = useRef({});
-  const seriesRef = useRef({});
-
-  useEffect(() => { headerRef.current = header; }, [header]);
-  useEffect(() => { latestRef.current = latest; }, [latest]);
-  useEffect(() => { seriesRef.current = series; }, [series]);
-
   const readerRef = useRef(null);
   const writerRef = useRef(null);
-  const portRef = useRef(null);
+  const portRef   = useRef(null);
 
+  // State
   const [isSupported] = useState(() => typeof navigator !== "undefined" && navigator.serial);
   const [isConnected, setIsConnected] = useState(false);
   const [baudRate, setBaudRate] = useState(115200);
-  const [autoNewline, setAutoNewline] = useState("\r");
-  const [header, setHeader] = useState(null);
+  const [autoNewline, setAutoNewline] = useState("\r"); // "none" | "\r" | "\n" | "\r\n"
+  const [csvHeader, setCsvHeader] = useState(null);
   const [latest, setLatest] = useState({});
   const [series, setSeries] = useState({});
   const [rawLog, setRawLog] = useState([]);
   const [activeTab, setActiveTab] = useState("latest");
   const [sending, setSending] = useState(false);
   const [customCmd, setCustomCmd] = useState("");
-  const [maxPoints] = useState(600);
   const [customHeaderText, setCustomHeaderText] = useState("");
+  const [maxPoints] = useState(600);
 
+  // Refs to avoid stale closures in the stream loop
+  const csvHeaderRef = useRef(null);
+  const latestRef = useRef({});
+  const seriesRef = useRef({});
+
+  useEffect(() => { csvHeaderRef.current = csvHeader; }, [csvHeader]);
+  useEffect(() => { latestRef.current = latest; }, [latest]);
+  useEffect(() => { seriesRef.current = series; }, [series]);
 
   const presentSensors = useMemo(() => {
-    if (!header) return [];
-    return SENSOR_MAP.filter((meta) => header.some((h) => meta.matches(h)));
-  }, [header]);
+    if (!csvHeader) return [];
+    return SENSOR_MAP.filter((meta) => csvHeader.some((h) => meta.matches(h)));
+  }, [csvHeader]);
 
   useEffect(() => {
     if (!isSupported) return;
     return () => void disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSupported]);
 
-async function connect() {
-  try {
-    if (!navigator.serial) throw new Error("Web Serial API not available");
-    const filters = [{ usbVendorId: 0x10c4 }]; // optional SiLabs CP210x filter
-    const port = await navigator.serial.requestPort({ filters }).catch(() => null);
-    if (!port) return;
+  // -----------------------------
+  // Serial connect / disconnect
+  // -----------------------------
+  async function connect() {
+    try {
+      if (!navigator.serial) throw new Error("Web Serial API not available");
+      const filters = [{ usbVendorId: 0x10c4 }]; // optional: CP210x filter
+      const port = await navigator.serial.requestPort({ filters }).catch(() => null);
+      if (!port) return;
 
-    await port.open({ baudRate, bufferSize: 65536 });
-    portRef.current = port;
+      await port.open({ baudRate, bufferSize: 65536 });
+      portRef.current = port;
 
-    // Reader: bytes -> text -> lines
-    const textDecoder = new TextDecoderStream();
-    port.readable.pipeTo(textDecoder.writable).catch(() => {});
+      // Reader: bytes -> text -> lines
+      const textDecoder = new TextDecoderStream();
+      port.readable.pipeTo(textDecoder.writable).catch(() => {});
+      const lb = new LineBreakTransformer(); // reuse one instance
+      const lineStream = textDecoder.readable.pipeThrough(
+        new TransformStream({
+          start() {},
+          transform(chunk, controller) { lb.transform(chunk, controller); },
+          flush(controller) { lb.flush(controller); },
+        })
+      );
+      readerRef.current = lineStream.getReader();
 
-    // Reuse ONE splitter instance so partial lines aren’t lost
-    const lb = new LineBreakTransformer();
-    const lineStream = textDecoder.readable.pipeThrough(
-      new TransformStream({
-        start() {},
-        transform(chunk, controller) {
-          lb.transform(chunk, controller);
-        },
-        flush(controller) {
-          lb.flush(controller);
-        },
-      })
-    );
-    readerRef.current = lineStream.getReader();
+      // Writer: text -> bytes
+      const textEncoder = new TextEncoderStream();
+      textEncoder.readable.pipeTo(port.writable).catch(() => {});
+      writerRef.current = textEncoder.writable.getWriter();
 
-    // Writer: text -> bytes
-    const textEncoder = new TextEncoderStream();
-    textEncoder.readable.pipeTo(port.writable).catch(() => {});
-    writerRef.current = textEncoder.writable.getWriter();
-
-    setIsConnected(true);
-    readLoop();
-  } catch (err) {
-    console.error(err);
-    pushLog(`⚠️ Connect error: ${err.message}`);
-    await disconnect();
+      setIsConnected(true);
+      readLoop();
+    } catch (err) {
+      console.error(err);
+      pushLog(`⚠️ Connect error: ${err.message}`);
+      await disconnect();
+    }
   }
-}
-
 
   async function disconnect() {
     try {
-      if (readerRef.current) {
-        try { await readerRef.current.cancel(); } catch {}
-        readerRef.current = null;
-      }
-      if (writerRef.current) {
-        try { await writerRef.current.close(); } catch {}
-        writerRef.current = null;
-      }
-      if (portRef.current) {
-        try { await portRef.current.close(); } catch {}
-        portRef.current = null;
-      }
+      if (readerRef.current) { try { await readerRef.current.cancel(); } catch {} readerRef.current = null; }
+      if (writerRef.current) { try { await writerRef.current.close(); } catch {} writerRef.current = null; }
+      if (portRef.current)   { try { await portRef.current.close(); } catch {} portRef.current = null; }
     } finally {
       setIsConnected(false);
     }
@@ -190,6 +175,9 @@ async function connect() {
     });
   }
 
+  // -----------------------------
+  // Stream read & parse
+  // -----------------------------
   async function readLoop() {
     const reader = readerRef.current;
     if (!reader) return;
@@ -211,39 +199,47 @@ async function connect() {
     // Always log raw for debugging
     pushLog(trimmed);
 
-    // If we don't have a header yet, try to detect one
-    if (!headerRef.current) {
-      // case: textual header (with letters/units)
+    // If we don't have a header yet, try to detect one or assume default
+    if (!csvHeaderRef.current) {
+      // Textual header (with letters/units)
       if (/,/.test(trimmed) && /[A-Za-z]/.test(trimmed)) {
         const tokens = trimmed.split(/\s*,\s*/);
-        console.log("Detected header:", tokens);
-        headerRef.current = tokens;     // update ref immediately for next line
-        setHeader(tokens);              // update state for UI
+        csvHeaderRef.current = tokens;
+        setCsvHeader(tokens);
         return;
       }
-      // (optional) if you support a default header when only numeric rows arrive, you can set it here
-      return;
+      // Numeric row first — assume default if length matches
+      if (/,/.test(trimmed) && looksLikeNumericCsv(trimmed)) {
+        const cells = trimmed.split(/\s*,\s*/);
+        if (cells.length === DEFAULT_HEADER.length) {
+          csvHeaderRef.current = DEFAULT_HEADER;
+          setCsvHeader(DEFAULT_HEADER);
+          // fall through to parse this very row as data
+        } else {
+          return; // wait for a header or matching-length row
+        }
+      } else {
+        return;
+      }
     }
 
-    // From here on we have a header and can parse data rows
+    // Parse data with a known header
     if (trimmed.includes(",")) {
-      const hdr = headerRef.current;
+      const hdr = csvHeaderRef.current;
       const cells = trimmed.split(/\s*,\s*/);
       if (cells.length !== hdr.length) {
-        // Helpful debug so we can see why parsing was skipped
+        // Helpful debug
         console.warn("CSV length mismatch", { expected: hdr.length, got: cells.length, hdr, line: trimmed });
         return;
       }
 
-      // Build row object
       const row = {};
       for (let i = 0; i < hdr.length; i++) row[hdr[i]] = cells[i] ?? "";
 
       const nowMs = Date.now();
       const t = buildTimestamp(row, nowMs);
 
-      // Update "latest" (functional form to avoid stale state)
-      setLatest(prev => {
+      setLatest((prev) => {
         const next = { ...prev };
         for (const h of hdr) {
           const num = parseMaybeNumber(row[h]);
@@ -252,11 +248,10 @@ async function connect() {
         return next;
       });
 
-      // Update time-series for any known sensors
-      setSeries(prev => {
+      setSeries((prev) => {
         const next = { ...prev };
         for (const meta of SENSOR_MAP) {
-          const matchingHeader = hdr.find(h => meta.matches(h));
+          const matchingHeader = hdr.find((h) => meta.matches(h));
           if (!matchingHeader) continue;
           const v = parseMaybeNumber(row[matchingHeader]);
           if (!next[meta.key]) next[meta.key] = [];
@@ -270,6 +265,9 @@ async function connect() {
     }
   }
 
+  // -----------------------------
+  // Sending commands
+  // -----------------------------
   async function send(text) {
     if (!writerRef.current) return;
     setSending(true);
@@ -303,7 +301,7 @@ async function connect() {
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="text-sm text-slate-500">{title}</div>
         <div className="mt-1 text-2xl font-semibold text-slate-900">
-          {value}
+          {value ?? "—"}
           {unit ? <span className="ml-1 align-middle text-base font-normal text-slate-500">{unit}</span> : null}
         </div>
       </div>
@@ -311,10 +309,12 @@ async function connect() {
   }
 
   function ChartCard({ meta, data }) {
-    const chartData = useMemo(() => data.map((d) => ({ x: d.t, y: d.v })), [data]);
+    const chartData = useMemo(() => (data || []).map((d) => ({ x: d.t, y: d.v })), [data]);
     return (
       <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-2 text-sm font-medium text-slate-700">{meta.label}{meta.unit ? `  (${meta.unit})` : ""}</div>
+        <div className="mb-2 text-sm font-medium text-slate-700">
+          {meta.label}{meta.unit ? `  (${meta.unit})` : ""}
+        </div>
         <div className="h-48">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
@@ -331,6 +331,9 @@ async function connect() {
     );
   }
 
+  // -----------------------------
+  // UI
+  // -----------------------------
   return (
     <div className="min-h-screen bg-slate-50">
       {/* Top Bar */}
@@ -340,9 +343,7 @@ async function connect() {
             <div className="flex items-center gap-3">
               <div className={`h-3 w-3 rounded-full ${isConnected ? "bg-green-500" : "bg-slate-300"}`} />
               <h1 className="text-xl font-semibold text-slate-900">PAM WebSerial Dashboard</h1>
-              {!isSupported && (
-                <span className="ml-2 text-sm text-red-600">Web Serial not supported in this browser.</span>
-              )}
+              {!isSupported && <span className="ml-2 text-sm text-red-600">Web Serial not supported in this browser.</span>}
             </div>
             <div className="flex items-center gap-3">
               <label className="text-sm text-slate-600">Baud</label>
@@ -369,68 +370,58 @@ async function connect() {
       {/* Tabs */}
       <main className="mx-auto max-w-7xl px-4 py-6">
         <div className="mb-4 flex flex-wrap items-center gap-2">
-          {([
-            ["latest", "Latest"],
-            ["graphs", "Graphs"],
-            ["settings", "Settings"],
-            ["log", "Log"],
-          ]).map(([key, label]) => (
+          {([["latest","Latest"],["graphs","Graphs"],["settings","Settings"],["log","Log"]]).map(([key, label]) => (
             <button
               key={key}
               onClick={() => setActiveTab(key)}
-              className={`rounded-full px-4 py-1.5 text-sm ${
-                activeTab === key ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-300"
-              }`}
+              className={`rounded-full px-4 py-1.5 text-sm ${activeTab === key ? "bg-slate-900 text-white" : "bg-white text-slate-700 border border-slate-300"}`}
             >
               {label}
             </button>
           ))}
         </div>
 
-        {/* Latest Tab */}
+        {/* Latest */}
         {activeTab === "latest" && (
           <section className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {/* Device / meta */}
-            <StatCard title="Device ID" value={latestFind(header, latest, /DeviceId/i) || "—"} />
-            <StatCard title="Last Timestamp" value={((latestFind(header, latest, /Date/i) || "") + (latestFind(header, latest, /Time/i) ? " " + latestFind(header, latest, /Time/i) : "")) || "—"} />
-            <StatCard title="Battery" value={latestFind(header, latest, /Battery/i)} unit="%" />
+            <StatCard title="Device ID" value={latestFind(csvHeader, latest, /DeviceId/i)} />
+            <StatCard
+              title="Last Timestamp"
+              value={
+                ((latestFind(csvHeader, latest, /Date/i) || "") +
+                (latestFind(csvHeader, latest, /Time/i) ? " " + latestFind(csvHeader, latest, /Time/i) : "")) || "—"
+              }
+            />
+            <StatCard title="Battery" value={latestFind(csvHeader, latest, /Battery/i)} unit="%" />
 
-            {/* Environmental */}
-            <StatCard title="Temperature" value={latestFind(header, latest, /TEMP\b/i)} unit="°C" />
-            <StatCard title="Humidity" value={latestFind(header, latest, /RELH|RH\b/i)} unit="%" />
-            <StatCard title="Pressure" value={latestFind(header, latest, /PRESS\b/i)} unit="hPa" />
+            <StatCard title="Temperature" value={latestFind(csvHeader, latest, /TEMP\b/i)} unit="°C" />
+            <StatCard title="Humidity" value={latestFind(csvHeader, latest, /RELH|RH\b/i)} unit="%" />
+            <StatCard title="Pressure" value={latestFind(csvHeader, latest, /PRESS\b/i)} unit="hPa" />
 
-            {/* Particulate */}
-            <StatCard title="PM1" value={latestFind(header, latest, /\bPM1\b/i)} unit="µg/m³" />
-            <StatCard title="PM2.5" value={latestFind(header, latest, /PM2\.5/i)} unit="µg/m³" />
-            <StatCard title="PM10" value={latestFind(header, latest, /\bPM10\b/i)} unit="µg/m³" />
+            <StatCard title="PM1" value={latestFind(csvHeader, latest, /\bPM1\b/i)} unit="µg/m³" />
+            <StatCard title="PM2.5" value={latestFind(csvHeader, latest, /PM2\.5/i)} unit="µg/m³" />
+            <StatCard title="PM10" value={latestFind(csvHeader, latest, /\bPM10\b/i)} unit="µg/m³" />
 
-            {/* Gases */}
-            <StatCard title="NO₂" value={latestFind(header, latest, /\bNO2\b/i)} unit="ppb" />
-            <StatCard title="CO" value={latestFind(header, latest, /\bCO\b/i)} unit="ppb" />
-            <StatCard title="CO₂" value={latestFind(header, latest, /\bCO2\b/i)} unit="ppm" />
-            <StatCard title="TVOCs" value={latestFind(header, latest, /TVOC/i)} unit="ppb" />
+            <StatCard title="NO₂" value={latestFind(csvHeader, latest, /\bNO2\b/i)} unit="ppb" />
+            <StatCard title="CO" value={latestFind(csvHeader, latest, /\bCO\b/i)} unit="ppb" />
+            <StatCard title="CO₂" value={latestFind(csvHeader, latest, /\bCO2\b/i)} unit="ppm" />
+            <StatCard title="TVOCs" value={latestFind(csvHeader, latest, /TVOC/i)} unit="ppb" />
 
-            {/* GPS */}
-            <StatCard title="Latitude" value={latest["LAT(LAT)"] ?? "—"} />
-            <StatCard title="Longitude" value={latest["LON(LON)"] ?? "—"} />
-
-            
+            <StatCard title="Latitude"  value={latestFind(csvHeader, latest, /^LAT/i) ?? latest["LAT(LAT)"] ?? latest["LAT"]} />
+            <StatCard title="Longitude" value={latestFind(csvHeader, latest, /^LON/i) ?? latest["LON(LON)"] ?? latest["LON"]} />
           </section>
         )}
 
-        {/* Graphs Tab */}
+        {/* Graphs */}
         {activeTab === "graphs" && (
           <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {presentSensors
-              .filter((m) => m.key !== "BAT")
-              .map((meta) => (
-                <ChartCard key={meta.key} meta={meta} data={series[meta.key] || []} />
-              ))}
+            {presentSensors.filter((m) => m.key !== "BAT").map((meta) => (
+              <ChartCard key={meta.key} meta={meta} data={series[meta.key] || []} />
+            ))}
           </section>
         )}
 
-        {/* Settings Tab */}
+        {/* Settings */}
         {activeTab === "settings" && (
           <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             {/* Serial options */}
@@ -448,14 +439,15 @@ async function connect() {
                   <option value="\n">LF (\n)</option>
                   <option value="\r\n">CRLF (\r\n)</option>
                 </select>
-                <button
-                  onClick={() => { setHeader(DEFAULT_HEADER); pushLog("Assumed default header"); }}
-                  className="mt-3 rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
-                >
-                  Assume Default Header
-                </button>
-                
               </div>
+
+              <button
+                onClick={() => { csvHeaderRef.current = DEFAULT_HEADER; setCsvHeader(DEFAULT_HEADER); pushLog("Assumed default header"); }}
+                className="mt-3 rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+              >
+                Assume Default Header
+              </button>
+
               <div className="mt-3 flex gap-2">
                 <input
                   type="text"
@@ -467,13 +459,14 @@ async function connect() {
                 <button
                   onClick={() => {
                     const tokens = (customHeaderText || "").split(",").map(s => s.trim()).filter(Boolean);
-                    if (tokens.length) { setHeader(tokens); pushLog("Custom header set"); }
+                    if (tokens.length) { csvHeaderRef.current = tokens; setCsvHeader(tokens); pushLog("Custom header set"); }
                   }}
                   className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
                 >
                   Set Header
                 </button>
               </div>
+
               <p className="mt-2 text-xs text-slate-500">
                 Tip: PAM menu commands are single letters (e.g., <code>m</code> to open menu, <code>k</code> for header, <code>x</code> to exit).
               </p>
@@ -488,13 +481,13 @@ async function connect() {
                 <QuickCmd label="Header (k)" cmd="k" />
                 <QuickCmd label="Exit (x)" cmd="x" />
                 <QuickCmd label="Toggle Cellular (d)" cmd="d" />
-                <QuickCmd label="Toggle Wi‑Fi (g)" cmd="g" />
+                <QuickCmd label="Toggle Wi-Fi (g)" cmd="g" />
                 <QuickCmd label="Restart (u)" cmd="u" confirm="Restart ESP now?" />
                 <QuickCmd label="List SD (p)" cmd="p" />
                 <QuickCmd label="Delete on SD (q)" cmd="q" />
               </div>
               <p className="mt-3 text-xs text-slate-500">
-                For device-specific settings, use <strong>a</strong> (Devices) then the appropriate sub‑menu for slope/zero/enable.
+                For device-specific settings, use <strong>a</strong> (Devices) then the appropriate sub-menu for slope/zero/enable.
               </p>
             </div>
 
@@ -522,7 +515,7 @@ async function connect() {
           </section>
         )}
 
-        {/* Log Tab */}
+        {/* Log */}
         {activeTab === "log" && (
           <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
@@ -542,7 +535,9 @@ async function connect() {
                 </button>
               </div>
             </div>
-            <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap text-xs text-slate-700">{rawLog.join("\n")}</pre>
+            <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap text-xs text-slate-700">
+{rawLog.join("\n")}
+            </pre>
           </section>
         )}
       </main>
@@ -558,9 +553,8 @@ async function connect() {
 }
 
 // -----------------------------
-// Utilities used in the UI
+// Utilities
 // -----------------------------
-
 function latestFind(header, latest, pattern) {
   if (!header) return null;
   const h = header.find((x) => pattern.test(x));
