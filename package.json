@@ -14,9 +14,11 @@
     "recharts": "^3.1.2",
     "web-vitals": "^2.1.4"
   },
+  "homepage" : "http://aurumaker.com/pam",
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
+    "deploy": "scp -r build/* craig@34.170.221.227:/var/www/html/pam/ && sudo chmod -R 755 /var/www/html/pam && sudo chown -R www-data:www-data /var/www/html/pam",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
@@ -37,5 +39,10 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17"
   }
 }

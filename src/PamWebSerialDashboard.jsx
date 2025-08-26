@@ -30,6 +30,17 @@ const SENSOR_MAP = [
   { key: "BAT", matches: (h) => /Battery/i.test(h), label: "Battery", unit: "%" },
 ];
 
+// Fallback default CSV header (when device streams rows without a header)
+const DEFAULT_HEADER = [
+  "DeviceId","PM1(UGM3)","PM2.5(UGM3)","PM10(UGM3)","TVOC(PPB)","CO2(PPM)","RELHUM(%)","TEMP(C)",
+  "PRESS(MBAR)","LAT(LAT)","LON(LON)","Battery(%)","Date","Time"
+];
+
+// True if the line looks like pure numeric CSV (covers GPS/date/time)
+function looksLikeNumericCsv(line) {
+  return /^[0-9 .,:\-]+$/.test(line);
+}
+
 // Line splitter for Web Serial stream -> lines of text
 class LineBreakTransformer {
   constructor() {
@@ -87,6 +98,8 @@ export default function PamWebSerialDashboard() {
   const [sending, setSending] = useState(false);
   const [customCmd, setCustomCmd] = useState("");
   const [maxPoints] = useState(600);
+  const [customHeaderText, setCustomHeaderText] = useState("");
+
 
   const presentSensors = useMemo(() => {
     if (!header) return [];
@@ -184,20 +197,39 @@ async function connect() {
   }
 
   function handleLine(line) {
-    const trimmed = line.trim();
+    const trimmed = String(line).trim();
     if (!trimmed) return;
 
+    // Always log raw
     pushLog(trimmed);
 
-    if (/,/.test(trimmed) && /[A-Za-z]/.test(trimmed) && /DeviceId|Time|Date|PM|CO|NO2|TVOC|RH|TEMP|PRESS/i.test(trimmed)) {
-      const tokens = trimmed.split(/\s*,\s*/);
-      setHeader(tokens);
-      return;
+    // If we don't have a header yet, try to detect one or assume default
+    if (!header) {
+      // Case A: the device prints a header line with letters/units
+      if (/,/.test(trimmed) && /[A-Za-z]/.test(trimmed)) {
+        const tokens = trimmed.split(/\s*,\s*/);
+        setHeader(tokens);
+        return;
+      }
+      // Case B: data rows arrive without a header — assume our default if it fits
+      if (/,/.test(trimmed) && looksLikeNumericCsv(trimmed)) {
+        const cells = trimmed.split(/\s*,\s*/);
+        if (cells.length === DEFAULT_HEADER.length) {
+          setHeader(DEFAULT_HEADER);
+          // fall through to parse this row with the assumed header
+        } else {
+          // not enough info yet — wait for a header or matching-length row
+          return;
+        }
+      } else {
+        return;
+      }
     }
 
+    // Parse a data row when header is known
     if (header && trimmed.includes(",")) {
       const cells = trimmed.split(/\s*,\s*/);
-      if (cells.length !== header.length) return;
+      if (cells.length !== header.length) return; // ignore mismatched rows
 
       const row = {};
       header.forEach((h, i) => (row[h] = cells[i] ?? ""));
@@ -205,6 +237,7 @@ async function connect() {
       const nowMs = Date.now();
       const t = buildTimestamp(row, nowMs);
 
+      // Update latest map
       const nextLatest = { ...latest };
       for (const h of header) {
         const raw = row[h];
@@ -213,6 +246,7 @@ async function connect() {
       }
       setLatest(nextLatest);
 
+      // Update series
       const update = { ...series };
       for (const meta of SENSOR_MAP) {
         const matchingHeader = header.find((h) => meta.matches(h));
@@ -220,7 +254,9 @@ async function connect() {
         const v = parseMaybeNumber(row[matchingHeader]);
         if (!update[meta.key]) update[meta.key] = [];
         update[meta.key] = [...update[meta.key], { t, v }];
-        if (update[meta.key].length > maxPoints) update[meta.key].splice(0, update[meta.key].length - maxPoints);
+        if (update[meta.key].length > maxPoints) {
+          update[meta.key].splice(0, update[meta.key].length - maxPoints);
+        }
       }
       setSeries(update);
     }
@@ -347,8 +383,8 @@ async function connect() {
         {activeTab === "latest" && (
           <section className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {/* Device / meta */}
-            <StatCard title="Device ID" value={latest["DeviceId"] ?? "—"} />
-            <StatCard title="Last Timestamp" value={latest["Time"] ? `${latest["Date"]} ${latest["Time"]}` : "—"} />
+            <StatCard title="Device ID" value={latestFind(header, latest, /DeviceId/i) || "—"} />
+            <StatCard title="Last Timestamp" value={((latestFind(header, latest, /Date/i) || "") + (latestFind(header, latest, /Time/i) ? " " + latestFind(header, latest, /Time/i) : "")) || "—"} />
             <StatCard title="Battery" value={latestFind(header, latest, /Battery/i)} unit="%" />
 
             {/* Environmental */}
@@ -370,6 +406,8 @@ async function connect() {
             {/* GPS */}
             <StatCard title="Latitude" value={latest["LAT(LAT)"] ?? "—"} />
             <StatCard title="Longitude" value={latest["LON(LON)"] ?? "—"} />
+
+            
           </section>
         )}
 
@@ -402,6 +440,31 @@ async function connect() {
                   <option value="\n">LF (\n)</option>
                   <option value="\r\n">CRLF (\r\n)</option>
                 </select>
+                <button
+                  onClick={() => { setHeader(DEFAULT_HEADER); pushLog("Assumed default header"); }}
+                  className="mt-3 rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+                >
+                  Assume Default Header
+                </button>
+                
+              </div>
+              <div className="mt-3 flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Paste custom header CSV"
+                  value={customHeaderText}
+                  onChange={(e) => setCustomHeaderText(e.target.value)}
+                  className="flex-1 rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+                />
+                <button
+                  onClick={() => {
+                    const tokens = (customHeaderText || "").split(",").map(s => s.trim()).filter(Boolean);
+                    if (tokens.length) { setHeader(tokens); pushLog("Custom header set"); }
+                  }}
+                  className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+                >
+                  Set Header
+                </button>
               </div>
               <p className="mt-2 text-xs text-slate-500">
                 Tip: PAM menu commands are single letters (e.g., <code>m</code> to open menu, <code>k</code> for header, <code>x</code> to exit).
