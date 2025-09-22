@@ -226,6 +226,15 @@ export default function PamWebSerialDashboard() {
     return SENSOR_MAP.filter((meta) => csvHeader.some((h) => meta.matches(h)));
   }, [csvHeader]);
 
+  // Helpers for conditional Latest rendering
+  const hasHdr = (re) =>
+    Array.isArray(csvHeader) && csvHeader.some((h) => re.test(h));
+  const latestByRegex = (re) => {
+    if (!csvHeader) return null;
+    const h = csvHeader.find((x) => re.test(x));
+    return h ? latest[h] : null;
+  };
+
   useEffect(() => {
     if (!isSupported) return;
     return () => void disconnect();
@@ -700,116 +709,76 @@ export default function PamWebSerialDashboard() {
           ))}
         </div>
 
-        {/* Latest */}
         {activeTab === "latest" && (
           <section className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            <StatCard
-              title="Device ID"
-              value={latestFind(csvHeader, latest, /DeviceId/i)}
-            />
-            <StatCard
-              title="Last Timestamp"
-              value={
-                (latestFind(csvHeader, latest, /Date/i) || "") +
-                  (latestFind(csvHeader, latest, /Time/i)
-                    ? " " + latestFind(csvHeader, latest, /Time/i)
-                    : "") || "—"
-              }
-            />
-            <StatCard
-              title="Temperature"
-              value={latestFind(csvHeader, latest, /TEMP\b/i)}
-              unit={unitForHeader(/TEMP\b/i, csvHeader, "°C")}
-            />
-            <StatCard
-              title="Humidity"
-              value={latestFind(csvHeader, latest, /RELH|RH\b/i)}
-              unit={unitForHeader(/RELH|RH\b/i, csvHeader, "%")}
-            />
-            <StatCard
-              title="Pressure"
-              value={latestFind(csvHeader, latest, /PRESS\b/i)}
-              unit={unitForHeader(/PRESS\b/i, csvHeader, "hPa")}
-            />
+            <div className="md:col-span-2 lg:col-span-3 mb-2 flex justify-end">
+              <button
+                onClick={exportSeriesCsv}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+              >
+                Save to CSV
+              </button>
+            </div>
+            {/* Device ID + Timestamp only if present */}
+            {hasHdr(/DeviceId/i) && (
+              <StatCard
+                title="Device ID"
+                value={latestByRegex(/DeviceId/i) ?? "—"}
+              />
+            )}
+            {(hasHdr(/Date/i) || hasHdr(/Time/i)) && (
+              <StatCard
+                title="Last Timestamp"
+                value={
+                  (latestByRegex(/Date/i) || "") +
+                    (latestByRegex(/Time/i)
+                      ? ` ${latestByRegex(/Time/i)}`
+                      : "") || "—"
+                }
+              />
+            )}
 
-            <StatCard
-              title="PM1"
-              value={latestFind(csvHeader, latest, /\bPM1\b/i)}
-              unit={unitForHeader(/\bPM1\b/i, csvHeader, "µg/m³")}
-            />
-            <StatCard
-              title="PM2.5"
-              value={latestFind(csvHeader, latest, /PM2\.5/i)}
-              unit={unitForHeader(/PM2\.5/i, csvHeader, "µg/m³")}
-            />
-            <StatCard
-              title="PM10"
-              value={latestFind(csvHeader, latest, /\bPM10\b/i)}
-              unit={unitForHeader(/\bPM10\b/i, csvHeader, "µg/m³")}
-            />
+            {/* All sensor cards come from the header-driven sensor list */}
+            {presentSensors.map((meta) => {
+              const h = csvHeader.find((x) => meta.matches(x));
+              const v = h ? latest[h] : null;
+              return (
+                <StatCard
+                  key={meta.key}
+                  title={meta.label}
+                  value={v ?? "—"}
+                  unit={meta.unit}
+                />
+              );
+            })}
 
-            <StatCard
-              title="CO"
-              value={latestFind(csvHeader, latest, /\bCO\b/i)}
-              unit={unitForHeader(/\bCO\b/i, csvHeader, "ppm")}
-            />
-            <StatCard
-              title="CO₂"
-              value={latestFind(csvHeader, latest, /\bCO2\b/i)}
-              unit={unitForHeader(/\bCO2\b/i, csvHeader, "ppm")}
-            />
-            <StatCard
-              title="TVOCs"
-              value={latestFind(csvHeader, latest, /TVOC/i)}
-              unit={unitForHeader(/TVOC/i, csvHeader, "ppb")}
-            />
-
-            <StatCard
-              title="Cell Strength"
-              value={latestFind(csvHeader, latest, /Cell-Strength/i)}
-              unit={unitForHeader(/Cell-Strength/i, csvHeader, "dBm")}
-            />
-
-            <StatCard
-              title="Battery"
-              value={latestFind(csvHeader, latest, /Battery/i)}
-              unit={unitForHeader(/Battery/i, csvHeader, "%")}
-            />
-
-            <StatCard
-              title="NO₂"
-              value={latestFind(csvHeader, latest, /\bNO2\b/i)}
-              unit={unitForHeader(/\bNO2\b/i, csvHeader, "ppb")}
-            />
-
-            <StatCard
-              title="TVOCs"
-              value={latestFind(csvHeader, latest, /TVOC/i)}
-              unit={unitForHeader(/\bTVOC\b/i, csvHeader, "ppb")}
-            />
-
-            <StatCard
-              title="Latitude"
-              value={
-                latestFind(csvHeader, latest, /^LAT/i) ??
-                latest["LAT(LAT)"] ??
-                latest["LAT"]
-              }
-            />
-            <StatCard
-              title="Longitude"
-              value={
-                latestFind(csvHeader, latest, /^LON/i) ??
-                latest["LON(LON)"] ??
-                latest["LON"]
-              }
-            />
+            {/* Location only if present */}
+            {hasHdr(/^LAT/i) && (
+              <StatCard
+                title="Latitude"
+                value={latestByRegex(/^LAT/i) ?? "—"}
+              />
+            )}
+            {hasHdr(/^LON/i) && (
+              <StatCard
+                title="Longitude"
+                value={latestByRegex(/^LON/i) ?? "—"}
+              />
+            )}
           </section>
         )}
 
         {/* Graphs */}
         {activeTab === "graphs" && (
           <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div className="lg:col-span-2 mb-2 flex justify-end">
+              <button
+                onClick={exportSeriesCsv}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+              >
+                Save to CSV
+              </button>
+            </div>
             {presentSensors
               .filter((m) => m.key !== "BAT")
               .map((meta) => {
