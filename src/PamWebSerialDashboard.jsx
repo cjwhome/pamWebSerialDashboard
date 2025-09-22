@@ -88,14 +88,13 @@ const SENSOR_MAP = [
     unit: "%",
   },
 ];
-
+//DeviceId,CO(PPM),PM1(UGM3),PM2.5(UGM3),PM10(UGM3),CO2(PPM),RELHUM(%),TEMP(C),PRESS(HPA),LAT(LAT),LON(LON),Battery(%),Date,Time
 const DEFAULT_HEADER = [
   "DeviceId",
   "CO(PPM)",
   "PM1(UGM3)",
   "PM2.5(UGM3)",
   "PM10(UGM3)",
-  "TVOC(PPB)",
   "CO2(PPM)",
   "RELHUM(%)",
   "TEMP(C)",
@@ -103,7 +102,6 @@ const DEFAULT_HEADER = [
   "LAT(LAT)",
   "LON(LON)",
   "Battery(%)",
-  "Cell-Strength()",
   "Date",
   "Time",
 ];
