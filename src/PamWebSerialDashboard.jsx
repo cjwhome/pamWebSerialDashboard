@@ -221,6 +221,27 @@ export default function PamWebSerialDashboard() {
     seriesRef.current = series;
   }, [series]);
 
+  // Derive DeviceId from header/latest for display in the title
+  const deviceId = useMemo(() => {
+    try {
+      if (csvHeader && Array.isArray(csvHeader)) {
+        const key = csvHeader.find((h) => /DeviceId/i.test(h));
+        const v = key ? latest?.[key] : null;
+        if (v != null && String(v).trim() !== "") return String(v).trim();
+      }
+      if (
+        latest &&
+        latest.DeviceId != null &&
+        String(latest.DeviceId).trim() !== ""
+      ) {
+        return String(latest.DeviceId).trim();
+      }
+      return "";
+    } catch {
+      return "";
+    }
+  }, [csvHeader, latest]);
+
   const presentSensors = useMemo(() => {
     if (!csvHeader) return [];
     return SENSOR_MAP.filter((meta) => csvHeader.some((h) => meta.matches(h)));
@@ -279,17 +300,40 @@ export default function PamWebSerialDashboard() {
     localStorage.setItem(LS.TAB, activeTab);
   }, [activeTab]);
 
+  // Prefix helper: pulls DeviceId from the current header/latest and sanitizes it
+  function getDeviceIdPrefix() {
+    try {
+      let id = null;
+      // Prefer value from whatever header key matches "DeviceId"
+      if (csvHeader && Array.isArray(csvHeader)) {
+        const key = csvHeader.find((h) => /DeviceId/i.test(h));
+        if (key) id = latest?.[key];
+      }
+      // Fallback to direct field
+      if (id == null && latest && latest.DeviceId != null) id = latest.DeviceId;
+
+      const s = String(id ?? "").trim();
+      if (!s) return "";
+      // Safe for filenames
+      const safe = s.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+      return safe ? `${safe}_` : "";
+    } catch {
+      return "";
+    }
+  }
+
   // -----------------------------
   // Serial connect / disconnect
   // -----------------------------
 
   // Export the Raw Serial Log (one column: raw)
   function exportRawLogCsv() {
+    const prefix = getDeviceIdPrefix();
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const header = "raw";
     const rows = rawLog.map((line) => csvCell(line));
     const csv = [header, ...rows].join("\r\n");
-    downloadCsv(`pam_raw_log_${stamp}.csv`, csv);
+    downloadCsv(`${prefix}_pam_log_${stamp}.csv`, csv);
   }
 
   // Export the current time-series (wide table: Time + one col per sensor)
@@ -324,7 +368,7 @@ export default function PamWebSerialDashboard() {
     // Body rows
     for (const t of times) {
       const timeIso = new Date(t).toISOString();
-      const row = [csvCell(timeIso)];
+      const row = [csvCell(toLocalISO(t))];
       for (const m of sensors) {
         const v = mapsByKey[m.key].get(t);
         row.push(csvCell(v == null ? "" : v));
@@ -332,8 +376,9 @@ export default function PamWebSerialDashboard() {
       rows.push(row.join(","));
     }
 
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    downloadCsv(`pam_timeseries_${stamp}.csv`, rows.join("\r\n"));
+    const stamp = localStamp();
+    const prefix = getDeviceIdPrefix();
+    downloadCsv(`${prefix}pam_${stamp}.csv`, rows.join("\r\n"));
   }
 
   // Export time-series if present; otherwise export the raw log
@@ -651,6 +696,11 @@ export default function PamWebSerialDashboard() {
               />
               <h1 className="text-xl font-semibold text-slate-900">
                 PAM WebSerial Dashboard
+                {deviceId ? (
+                  <span className="ml-2 text-base font-normal text-slate-500">
+                    · Device {deviceId}
+                  </span>
+                ) : null}
               </h1>
               {!isSupported && (
                 <span className="ml-2 text-sm text-red-600">
@@ -954,6 +1004,47 @@ function latestFind(header, latest, pattern) {
 }
 
 // --- CSV helpers ---
+// ---- Local time helpers ----
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function pad3(n) {
+  return String(n).padStart(3, "0");
+}
+
+function tzOffsetString(d) {
+  // minutes *east* of UTC (positive = ahead)
+  const off = -d.getTimezoneOffset(); // JS gives minutes *west*, invert
+  const sign = off >= 0 ? "+" : "-";
+  const abs = Math.abs(off);
+  const hh = pad2(Math.floor(abs / 60));
+  const mm = pad2(abs % 60);
+  return `${sign}${hh}:${mm}`;
+}
+
+// For filenames (no colons), e.g. 2025-09-22T14-07-03-123
+function localStamp() {
+  const d = new Date();
+  return (
+    `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` +
+    `T${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(
+      d.getSeconds()
+    )}-${pad3(d.getMilliseconds())}`
+  );
+}
+
+// For CSV cells (ISO-like local with offset), e.g. 2025-09-22T14:07:03.123-06:00
+function toLocalISO(ms) {
+  const d = new Date(ms);
+  return (
+    `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` +
+    `T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(
+      d.getSeconds()
+    )}.${pad3(d.getMilliseconds())}` +
+    tzOffsetString(d)
+  );
+}
+
 function csvCell(v) {
   if (v == null) return "";
   const s = String(v);
@@ -961,7 +1052,9 @@ function csvCell(v) {
 }
 
 function downloadCsv(filename, csvString) {
-  const blob = new Blob([csvString], { type: "text/csv;charset=utf-8" });
+  // Prepend UTF-8 BOM so Excel opens the file with the right encoding
+  const BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
+  const blob = new Blob([BOM, csvString], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
